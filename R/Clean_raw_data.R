@@ -158,7 +158,7 @@ df_all <- bind_rows(
 #   theme_bw()
 # plotly::ggplotly()
 
-df_all_clean <- df_all |>
+df_all_prep <- df_all |>
   # clean plot IDs
   mutate(
     plot_id = stringr::str_remove_all(
@@ -172,18 +172,12 @@ df_all_clean <- df_all |>
   select(plot_id, water_depth, DateTime, metric, Temp_HOBO) |>
   tidyr::drop_na(Temp_HOBO)
 
-(ggplot(df_all_clean) +
+(ggplot(df_all_prep) +
   geom_line(aes(x = DateTime, y = Temp_HOBO, col = metric, group = plot_id)) +
   theme_bw()) |> plotly::ggplotly()
 
 
-data.table::fwrite(df_all_clean, "output/compiled/HOBO_compiled_nonfiltered.csv")
-
-# add metadata
-# add weather station data
-# calibrate sensor data
-# cut time of intrest
-# calculate slopes
+data.table::fwrite(df_all_prep, "output/compiled/HOBO_compiled_nonfiltered.csv")
 
 # Add metadata ----
 # clean metadata
@@ -194,6 +188,7 @@ df_meta <- data.table::fread("data/meta/metadata.csv") |>
 df_meta[4]$Longitude <- 45.035944
 df_meta[4]$Latitude <- 6.401333
 
+# assign shallow/deep and convert plot_id to character (for joining in next step)
 df_meta_clean <- df_meta |>
   rename("plot_id" = ID_plot) |>
   group_by(plot_id) |>
@@ -209,8 +204,10 @@ df_meta_clean <- df_meta |>
   select(-ID) |>
   mutate(plot_id = as.character(plot_id))
 
-# pivot to wider and left join
-df_all_clean |>
+data.table::fwrite(df_meta_clean, "output/meta/meta_clean.csv")
+
+# pivot to wider and left join metadata to measurements
+df_all_clean <- df_all_prep |>
   tidyr::pivot_wider(
     id_cols = c(plot_id, water_depth, DateTime),
     names_from = metric,
@@ -222,11 +219,77 @@ df_all_clean |>
     names_to = "metric",
     values_to = "Temp_HOBO"
   ) |>
-  tidyr::drop_na(Temp_HOBO) |>
-  distinct() |> nrow()
+  tidyr::drop_na(Temp_HOBO)
 
+# Calibrate sensor data ----
+#' Sensors were initially kept in a box in a (relatively) stable environment.
+#' Even so, sensors showed offsets. To correct these offsets, we will calculate
+#' the offset of each sensor to the median sensor's measurements.
+(df_all_clean |>
+  mutate(
+    unique_id = paste0(plot_id, water_depth) |> stringr::str_remove("NA")) |>
+  ggplot() +
+  geom_line(aes(x = DateTime, y = Temp_HOBO, col = metric, group = unique_id))) |>
+  plotly::ggplotly()
 
+#' At 24 September 2023 at midnight, plot 11 was visually confirmed to be the
+#' "median" = reference sensor for calibration.
 
+# T_ShelterGround is not calibrated: not available at time of calibration
+df_calib <- df_all_clean |>
+  filter(DateTime >= as.POSIXct("2023-09-24 00:00:00", tz = "UTC"),
+         DateTime <= as.POSIXct("2023-09-24 06:00:00", tz = "UTC"))
 
-df_all_clean |>
-  left_join(df_meta_clean) |> nrow()
+# subset plot 11 (reference for calibrating other sensors)
+df_calib_ref <- df_calib |>
+  filter(plot_id == "11", metric == "T_Air") |>
+  rename("Temp_HOBO_ref" = Temp_HOBO) |>
+  select(DateTime, Temp_HOBO_ref)
+
+# calculate mean offset (Temp_HOBO_ref - Temp_HOBO_ref) per plot & sensor
+df_calib_offsets <- df_calib |>
+  filter(plot_id != "11") |>
+  left_join(df_calib_ref) |>
+  mutate(T_offset = Temp_HOBO - Temp_HOBO_ref) |>
+  group_by(plot_id, metric) |>
+  summarize(T_offset_mean = mean(T_offset, na.rm = TRUE),
+            .groups = "drop") |>
+  mutate(T_offset_mean = ifelse(is.na(T_offset_mean), 0, T_offset_mean))
+
+# calibrate sensor data: succeeded
+(df_all_clean |>
+    filter(
+      # DateTime >= as.POSIXct("2023-09-25 12:00:00", tz = "UTC"),
+      DateTime <= as.POSIXct("2023-09-27 11:00:00", tz = "UTC")) |>
+    left_join(df_calib_offsets) |>
+    mutate(Temp_HOBO_cal = Temp_HOBO - T_offset_mean) |>
+    mutate(unique_id = paste0(plot_id, water_depth) |> stringr::str_remove("NA")) |>
+    ggplot() +
+    geom_line(aes(x = DateTime, y = Temp_HOBO_cal, col = metric, group = unique_id))) |>
+  plotly::ggplotly()
+
+# save and export calibrated time series data
+df_clean_calibrated <- df_all_clean |>
+  # filter(
+  #   DateTime >= as.POSIXct("2023-09-25 12:00:00", tz = "UTC"),
+  #   DateTime <= as.POSIXct("2023-09-27 11:00:00", tz = "UTC")) |>
+  left_join(df_calib_offsets) |>
+  mutate(Temp_HOBO_cal = Temp_HOBO - T_offset_mean)
+
+data.table::fwrite(df_clean_calibrated, "output/compiled/HOBO_calibrated.csv")
+
+# save and export calibrated time series data + filter only relevant time series
+df_clean_calibrated <- df_all_clean |>
+  filter(
+    DateTime >= as.POSIXct("2023-09-25 12:00:00", tz = "UTC"),
+    DateTime <= as.POSIXct("2023-09-27 11:00:00", tz = "UTC")) |>
+  left_join(df_calib_offsets) |>
+  mutate(Temp_HOBO_cal = Temp_HOBO - T_offset_mean)
+
+data.table::fwrite(df_clean_calibrated, "output/compiled/HOBO_cal_filtered.csv")
+
+# Join weather data ----
+df_clean_calibrated |>
+  # left_join(df_ws) |>
+  filter(lubridate::minute(DateTime) %in% c(0, 30))
+

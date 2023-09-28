@@ -12,6 +12,9 @@
 require(dplyr)
 
 # List files ----
+#' Given differing number of columns, df_list_* are loaded in separately to
+#' prevent column naming errors and joining/binding errors.
+
 # non-sheltered ground + air temperatures
 df_list_nw <- list.files("data/Summerschool_csv", full.names = TRUE, pattern = "*.csv")
 
@@ -238,7 +241,16 @@ df_all_clean <- df_all_prep |>
 # T_ShelterGround is not calibrated: not available at time of calibration
 df_calib <- df_all_clean |>
   filter(DateTime >= as.POSIXct("2023-09-24 00:00:00", tz = "UTC"),
-         DateTime <= as.POSIXct("2023-09-24 06:00:00", tz = "UTC"))
+         DateTime <= as.POSIXct("2023-09-24 05:00:00", tz = "UTC"))
+
+(df_calib |>
+    mutate(
+      unique_id = paste0(plot_id, water_depth) |> stringr::str_remove("NA")) |>
+    ggplot() +
+    geom_line(aes(x = DateTime, y = Temp_HOBO, col = metric, group = unique_id))) |>
+  plotly::ggplotly()
+
+data.table::fwrite(df_calib, "output/compiled/hobo_calibration_set.csv")
 
 # subset plot 11 (reference for calibrating other sensors)
 df_calib_ref <- df_calib |>
@@ -276,20 +288,69 @@ df_clean_calibrated <- df_all_clean |>
   left_join(df_calib_offsets) |>
   mutate(Temp_HOBO_cal = Temp_HOBO - T_offset_mean)
 
-data.table::fwrite(df_clean_calibrated, "output/compiled/HOBO_calibrated.csv")
+# edit weird timestamps (XX:X7)
+df_clean_calibrated <- df_clean_calibrated |>
+  filter(lubridate::minute(DateTime) %in% c(7 + seq(0, 50, 10))) |>
+  mutate(DateTime = DateTime + lubridate::minutes(3)) |>
+  bind_rows(
+    df_clean_calibrated |>
+      filter(!lubridate::minute(DateTime) %in% c(7 + seq(0, 50, 10)))
+  )
+
+# add new column denoting whether a value was calibrated or not
+# + coalesce calibrated data column (so no NA values for non-calibrated measurements)
+df_clean_calibrated_final <- df_clean_calibrated |>
+  mutate(
+    Calibrated = ifelse(!is.na(Temp_HOBO_cal), TRUE, FALSE),
+    Temp_HOBO_cal = ifelse(is.na(Temp_HOBO_cal), Temp_HOBO, Temp_HOBO_cal)
+  )
+
+data.table::fwrite(df_clean_calibrated_final, "output/compiled/HOBO_calibrated.csv")
 
 # save and export calibrated time series data + filter only relevant time series
-df_clean_calibrated <- df_all_clean |>
+df_clean_calibrated_filter <- df_clean_calibrated_final |>
   filter(
-    DateTime >= as.POSIXct("2023-09-25 12:00:00", tz = "UTC"),
-    DateTime <= as.POSIXct("2023-09-27 11:00:00", tz = "UTC")) |>
-  left_join(df_calib_offsets) |>
-  mutate(Temp_HOBO_cal = Temp_HOBO - T_offset_mean)
+    DateTime >= as.POSIXct("2023-09-25 10:00:00", tz = "UTC"), # 12 GMT+2
+    DateTime <= as.POSIXct("2023-09-27 09:00:00", tz = "UTC")) # 11 GMT+2
 
-data.table::fwrite(df_clean_calibrated, "output/compiled/HOBO_cal_filtered.csv")
+data.table::fwrite(df_clean_calibrated_filter, "output/compiled/HOBO_cal_filtered.csv")
 
 # Join weather data ----
-df_clean_calibrated |>
-  # left_join(df_ws) |>
-  filter(lubridate::minute(DateTime) %in% c(0, 30))
+# import calibrated data
+# df_clean_calibrated <- data.table::fread("output/compiled/HOBO_cal_filtered.csv")
 
+# import weather data
+load("data/weatherstation/Weather_Station.RData")
+df_ws <- meteo |>
+  mutate(
+    across(
+      c(Temp_WS, RH, WindS_Max, Slr_Avg), ~as.numeric(.x)
+    )
+  )
+
+# visualize data for testing
+df_clean_calibrated_filter |>
+  mutate(
+    unique_id = paste0(plot_id, water_depth) |> stringr::str_remove("NA")
+    ) |>
+  select(DateTime, Temp_HOBO, Temp_HOBO_cal, unique_id, metric) |>
+  ggplot() +
+  geom_line(aes(x = DateTime, y = Temp_HOBO, col = unique_id)) +
+  theme_bw() +
+  facet_wrap(~metric)
+
+# join weather data
+df_hobo_ws <- df_clean_calibrated_filter |>
+  left_join(df_ws) |>
+  data.table::as.data.table() |>
+  tidyr::drop_na(Temp_WS)
+
+# join canopy cover data
+can_cov <- data.table::fread("data/meta/canopy_cover_clean.csv") |>
+  mutate(plot_id = as.character(plot_id))
+
+df_hobo_ws_can <- df_hobo_ws |>
+  left_join(can_cov)
+
+data.table::fwrite(df_hobo_ws_can, "output/compiled/hobo_ws_canopy_joined.csv")
+save(df_hobo_ws_can, file = "output/compiled/hobo_ws_canopy_joined.RData")

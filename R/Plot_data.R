@@ -27,6 +27,10 @@ df_meta <- data.table::fread("output/meta/meta_clean.csv")
 load("output/compiled/hobo_ws_canopy_joined.RData")
 df_hobo_ws_can
 
+# slope results
+load("output/slopes/slopes_meta.RData")
+slopes_meta
+
 # Set ggplot theme ----
 
 # Map of data points ----
@@ -66,8 +70,8 @@ df_hobo_ws_can |>
   theme(legend.position = "none") +
   labs(y = "Temperature (°C)", x = "")
 
-ggsave(filename = "graphs/timeseries_overview.svg",
-       width = 8, height = 6)
+ggsave(filename = "graphs/timeseries_overview_new.svg",
+       width = 10, height = 6)
 
 # Raw vs calibrated (calibration time series) ----
 df_cal |>
@@ -98,9 +102,58 @@ df_cal |>
   ggsci::scale_color_npg() +
   scale_alpha_manual(values = c(1, 0.5))
 
-
 ggsave(filename = "graphs/calibration_ex.svg",
        width = 8, height = 6)
 
+# Slopes overview ----
+slopes_meta |>
+  mutate(plot_id = as.numeric(plot_id)) |>
+  left_join(df_meta) |>
+  left_join(df_precal |> distinct(plot_id, water_depth, metric)) |>
+  mutate(
+    intercept = equilibrium * (1-slope),
+    intercept_log = equilibrium * (1-slope_log)
+  ) |>
+  ggplot() +
+  geom_point(aes(x = c(rep(-3, 81), 47), y = c(rep(-3, 81), 47)), alpha = 0) +
+  geom_abline(aes(slope = slope, intercept = intercept, col = Habitat)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "11", col = "black") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~metric)
 
 
+slopes_meta |>
+  mutate(plot_id = as.numeric(plot_id)) |>
+  left_join(df_meta) |>
+  left_join(df_precal |> distinct(plot_id, water_depth, metric)) |>
+  mutate(
+    intercept = equilibrium * (1-slope),
+    intercept_log = equilibrium * (1-slope_log),
+    Habitat = factor(Habitat,
+                     levels = c("Grassland",
+                                "Open_forest",
+                                "Wet_grassland",
+                                "Close_forest",
+                                "Fresh_water"))
+  ) |>
+  ggplot() +
+  # geom_boxplot(aes(x = metric, y = slope_log, col = Habitat),
+  geom_boxplot(aes(x = metric, y = slope, col = Habitat),
+               position = position_dodge2(preserve = "single")) +
+  geom_hline(yintercept = 1, linetype = "11") +
+  labs(x = "") +
+  theme_bw() +
+  scale_color_manual(
+    values = c(
+      "Close_forest" = "#FF2E00",
+      "Open_forest" = "#E6C229",
+      "Grassland" = "#4D9078",
+      "Fresh_water" = "#2D7DD2",
+      "Wet_grassland" = "#783C27"
+    )
+  )# +
+  # coord_flip()
+
+ggsave(filename = "graphs/slopes_habitat_nonlog.svg",
+       width = 5, height = 6)

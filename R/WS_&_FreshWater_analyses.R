@@ -1,0 +1,87 @@
+library(tidyverse)
+library(ade4)
+
+
+#1-Weather Station :
+####################  
+meteo <- read.csv("C:/Users/Yuna/Desktop/tp1microclimats/CR6_tele_meteo_lautaret_10.dat",skip = 1)
+
+meteo<-tail(meteo,-2)
+
+meteo %>% 
+  select(-AirT_Min,-AirT_Max,-RECORD,-WindD,-WindS_Avg,-Prcp_Tot,-SnowH_Avg) %>% 
+  mutate(DateTime=ymd_hms(TIMESTAMP)) %>% 
+  select(-TIMESTAMP) %>% 
+  rename("Temp_WS" = AirT_Avg )->meteo
+
+
+#save(meteo,file="Weather_Station.RData")
+
+#2-Freshwater analyse :
+#######################  
+
+load(file="hobo_ws_canopy_joined.RData") 
+data<-df_hobo_ws_can
+rm(df_hobo_ws_can)
+
+
+
+data%>%
+  filter(plot_id %in% c("13","14","15","16"))%>%
+  select(plot_id,DateTime,Habitat,metric,Temp_HOBO_cal,Temp_WS,Depth,water_depth) %>% 
+  rename("Temp" = Temp_HOBO_cal )->lm
+
+mod_cb <- lmer(Temp ~ Temp_WS*metric + (1|plot_id), data=lm, na.action = na.omit)
+summary(mod_cb)
+
+
+#Correction of the model
+
+
+mod_cb <- lmer(Temp ~ Temp_WS*metric + (1|plot_id)+ (1|DateTime), data=lm, na.action = na.omit)
+summary(mod_cb)
+
+##A-Water temp x Temp WS for all plots
+
+lm %>% 
+  filter(plot_id %in% c("13","14","15","16")& water_depth %in% c("shallow",NA) & metric=="T_Water") %>% 
+  rename("Water_temperature"=Temp) %>% 
+  ggplot(aes(x=Temp_WS, y=Water_temperature))+
+  geom_smooth(method="lm")+
+  geom_point()+
+  facet_wrap(~plot_id)+
+  theme_bw()
+
+# ggsave("graphique_n3.png", width = 11, height = 8)
+
+
+
+##B-Water temp x different depth
+
+##1-Water dynamic
+
+lm %>% 
+  filter(plot_id %in% c("15","16")&metric=="T_Water") %>% 
+  rename("Water_temperature"=Temp) %>% 
+  ggplot(aes(x=Temp_WS, y=Water_temperature,color=water_depth))+
+  geom_point(alpha=0.4)+
+  geom_smooth(method="lm")+
+  facet_wrap(~plot_id)+
+  theme_bw()
+
+# ggsave("graphique_n1.png", width = 7, height = 4)
+
+
+##2- Buffering
+
+lm %>% 
+  filter(plot_id %in% c("15","16")&metric=="T_Water") %>% 
+  rename("Water_temperature"=Temp) %>% 
+  ggplot(aes(x=DateTime, y=Water_temperature,color=water_depth))+
+  geom_line()+
+  facet_wrap(~plot_id)+
+  theme_bw()+
+  ggtitle("")
+
+# ggsave("graphique_n2.png", width = 7, height = 4)
+
